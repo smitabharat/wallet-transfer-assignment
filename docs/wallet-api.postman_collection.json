@@ -1,0 +1,101 @@
+{
+  "info": {
+    "name": "Wallet Transfer API",
+    "description": "Run the requests top to bottom. 'Create transfer' saves the new transfer id into the {{transferId}} variable for 'Get transfer'.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "transferId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health check",
+      "request": { "method": "GET", "url": "{{baseUrl}}/healthz" }
+    },
+    {
+      "name": "Create wallet alice",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"id\": \"alice\",\n  \"initialBalance\": 1000\n}" },
+        "url": "{{baseUrl}}/wallets"
+      }
+    },
+    {
+      "name": "Create wallet bob",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"id\": \"bob\",\n  \"initialBalance\": 0\n}" },
+        "url": "{{baseUrl}}/wallets"
+      }
+    },
+    {
+      "name": "Get wallet alice",
+      "request": { "method": "GET", "url": "{{baseUrl}}/wallets/alice" }
+    },
+    {
+      "name": "Create transfer (send twice to see replay)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const body = pm.response.json();",
+              "if (body.id) { pm.collectionVariables.set('transferId', body.id); }"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"idempotencyKey\": \"abc123\",\n  \"fromWalletId\": \"alice\",\n  \"toWalletId\": \"bob\",\n  \"amount\": 100\n}"
+        },
+        "url": "{{baseUrl}}/transfers"
+      }
+    },
+    {
+      "name": "Get transfer",
+      "request": { "method": "GET", "url": "{{baseUrl}}/transfers/{{transferId}}" }
+    },
+    {
+      "name": "Transfer with Idempotency-Key header",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "header-key-1" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"fromWalletId\": \"alice\",\n  \"toWalletId\": \"bob\",\n  \"amount\": 50\n}" },
+        "url": "{{baseUrl}}/transfers"
+      }
+    },
+    {
+      "name": "Error: insufficient funds (422)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"idempotencyKey\": \"too-much\",\n  \"fromWalletId\": \"bob\",\n  \"toWalletId\": \"alice\",\n  \"amount\": 999999\n}" },
+        "url": "{{baseUrl}}/transfers"
+      }
+    },
+    {
+      "name": "Error: same key, different amount (409)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"idempotencyKey\": \"abc123\",\n  \"fromWalletId\": \"alice\",\n  \"toWalletId\": \"bob\",\n  \"amount\": 5\n}" },
+        "url": "{{baseUrl}}/transfers"
+      }
+    },
+    {
+      "name": "Error: unknown wallet (404)",
+      "request": { "method": "GET", "url": "{{baseUrl}}/wallets/does-not-exist" }
+    }
+  ]
+}
