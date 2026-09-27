@@ -31,6 +31,14 @@ const (
 	codeLockNotAvailable     = "55P03"
 )
 
+// codeNumericValueOutOfRange is raised when a value does not fit the target
+// column, including BIGINT overflow. domain.TransferRequest.Validate rejects
+// amounts large enough to risk this before any query runs; this mapping is a
+// backstop so a value that reaches the database some other way (a future
+// caller, a balance that has grown very large over many transfers) fails as
+// a client error instead of an unmapped 500.
+const codeNumericValueOutOfRange = "22003"
+
 // Transactor runs a function inside a single database transaction.
 type Transactor interface {
 	WithTx(ctx context.Context, fn func(Repository) error) error
@@ -113,6 +121,8 @@ func mapError(err error) error {
 	switch pgErr.Code {
 	case codeSerializationFailure, codeDeadlockDetected, codeLockNotAvailable:
 		return fmt.Errorf("%w: %w", domain.ErrBusy, err)
+	case codeNumericValueOutOfRange:
+		return fmt.Errorf("%w: amount out of range: %w", domain.ErrValidation, err)
 	default:
 		return err
 	}

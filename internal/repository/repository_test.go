@@ -64,13 +64,29 @@ func TestSchemaRejectsNegativeBalance(t *testing.T) {
 
 func TestSchemaRejectsSecondDebitForSameTransfer(t *testing.T) {
 	s := openTestStore(t)
+	ctx := context.Background()
 	tr := seed(t, s)
 	pair := domain.NewLedgerPair(tr, time.Now())
-	if err := s.Reader().InsertLedgerEntries(context.Background(), pair[:]...); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Reader().InsertLedgerEntries(context.Background(), pair[0]); err == nil {
-		t.Fatal("duplicate debit entry was accepted")
+
+	// The UNIQUE(transfer_id, type) constraint checks immediately (it is not
+	// deferred), so the duplicate insert fails right away regardless of what
+	// transaction it runs in. Complete a correct pair and mark the transfer
+	// PROCESSED first so this test isolates that one constraint rather than
+	// also tripping the (deferred, commit-time) ledger-pair trigger.
+	err := s.WithTx(ctx, func(r Repository) error {
+		if err := r.InsertLedgerEntries(ctx, pair[:]...); err != nil {
+			return err
+		}
+		if err := markProcessed(ctx, t, r, tr); err != nil {
+			return err
+		}
+		if err := r.InsertLedgerEntries(ctx, pair[0]); err == nil {
+			t.Fatal("duplicate debit entry was accepted")
+		}
+		return errors.New("rollback: test does not intend to commit")
+	})
+	if err == nil {
+		t.Fatal("expected the transaction to fail")
 	}
 }
 
@@ -106,18 +122,109 @@ func TestStatusUpdateOnlyFromExpectedState(t *testing.T) {
 	s := openTestStore(t)
 	tr := seed(t, s)
 	ctx := context.Background()
-	tr.Status = domain.TransferProcessed
-	if err := s.Reader().UpdateTransferStatus(ctx, tr, domain.TransferPending); err != nil {
+
+	// A PROCESSED transfer needs its balanced ledger pair to satisfy the
+	// commit-time trigger; write it in the same transaction as the first,
+	// legal transition.
+	err := s.WithTx(ctx, func(r Repository) error {
+		pair := domain.NewLedgerPair(tr, time.Now())
+		if err := r.InsertLedgerEntries(ctx, pair[:]...); err != nil {
+			return err
+		}
+		tr.Status = domain.TransferProcessed
+		return r.UpdateTransferStatus(ctx, tr, domain.TransferPending)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	tr.Status = domain.TransferFailed
-	err := s.Reader().UpdateTransferStatus(ctx, tr, domain.TransferPending)
+	err = s.Reader().UpdateTransferStatus(ctx, tr, domain.TransferPending)
 	if !errors.Is(err, domain.ErrInvalidTransition) {
 		t.Fatalf("want ErrInvalidTransition, got %v", err)
 	}
 	got, _ := s.Reader().GetTransfer(ctx, tr.ID)
 	if got.Status != domain.TransferProcessed {
 		t.Errorf("status = %s, want PROCESSED", got.Status)
+	}
+}
+
+// markProcessed is a test-only helper: it moves tr straight from PENDING to
+// PROCESSED without writing (or checking) any ledger entries, so tests can
+// probe what the constraint trigger does or does not allow independently of
+// the service layer's own ordering.
+func markProcessed(ctx context.Context, t *testing.T, r Repository, tr domain.Transfer) error {
+	t.Helper()
+	tr.Status = domain.TransferProcessed
+	return r.UpdateTransferStatus(ctx, tr, domain.TransferPending)
+}
+
+func TestLedgerPairTriggerRejectsProcessedTransferWithOnlyOneEntry(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	tr := seed(t, s)
+
+	err := s.WithTx(ctx, func(r Repository) error {
+		if err := r.InsertLedgerEntries(ctx, domain.LedgerEntry{
+			TransferID: tr.ID, WalletID: tr.FromWalletID, Type: domain.EntryDebit, Amount: tr.Amount, CreatedAt: time.Now(),
+		}); err != nil {
+			return err
+		}
+		return markProcessed(ctx, t, r, tr)
+	})
+	if err == nil {
+		t.Fatal("commit succeeded with a PROCESSED transfer that has only a DEBIT entry, want an error")
+	}
+}
+
+func TestLedgerPairTriggerRejectsEntryForWrongWalletOrAmount(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	tr := seed(t, s)
+	pair := domain.NewLedgerPair(tr, time.Now())
+	pair[1].Amount = tr.Amount + 1 // credit amount does not match the transfer
+
+	err := s.WithTx(ctx, func(r Repository) error {
+		if err := r.InsertLedgerEntries(ctx, pair[:]...); err != nil {
+			return err
+		}
+		return markProcessed(ctx, t, r, tr)
+	})
+	if err == nil {
+		t.Fatal("commit succeeded with a credit amount that does not match the transfer, want an error")
+	}
+}
+
+func TestLedgerPairTriggerRejectsEntriesOnAPendingTransfer(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	tr := seed(t, s)
+	pair := domain.NewLedgerPair(tr, time.Now())
+
+	// tr is left PENDING: a balanced pair is still not allowed before the
+	// transfer is actually PROCESSED.
+	err := s.WithTx(ctx, func(r Repository) error {
+		return r.InsertLedgerEntries(ctx, pair[:]...)
+	})
+	if err == nil {
+		t.Fatal("commit succeeded with ledger entries on a PENDING transfer, want an error")
+	}
+}
+
+func TestLedgerPairTriggerAllowsACorrectPair(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	tr := seed(t, s)
+	pair := domain.NewLedgerPair(tr, time.Now())
+
+	err := s.WithTx(ctx, func(r Repository) error {
+		if err := r.InsertLedgerEntries(ctx, pair[:]...); err != nil {
+			return err
+		}
+		return markProcessed(ctx, t, r, tr)
+	})
+	if err != nil {
+		t.Fatalf("a correct debit/credit pair should be accepted: %v", err)
 	}
 }
 
