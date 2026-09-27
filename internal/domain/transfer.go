@@ -5,6 +5,7 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -71,6 +72,13 @@ type TransferRequest struct {
 // MaxIdempotencyKeyLength bounds the size of client supplied keys.
 const MaxIdempotencyKeyLength = 255
 
+// MaxAmount bounds a single transfer's amount well below the BIGINT column
+// limit (about 9.2e18) that stores wallet balances and ledger amounts. It
+// leaves enormous headroom for a wallet's balance to accumulate many
+// transfers without approaching an overflow, while still rejecting a client
+// value large enough to risk one at the database layer.
+const MaxAmount = 1_000_000_000_000_00 // 1 trillion, in minor units
+
 // Validate checks the business rules that do not need the database.
 func (r TransferRequest) Validate() error {
 	switch {
@@ -82,6 +90,8 @@ func (r TransferRequest) Validate() error {
 		return fmt.Errorf("%w: fromWalletId and toWalletId must differ", ErrValidation)
 	case r.Amount <= 0:
 		return fmt.Errorf("%w: amount must be a positive integer", ErrValidation)
+	case r.Amount > MaxAmount:
+		return fmt.Errorf("%w: amount must be at most %d", ErrValidation, MaxAmount)
 	case len(r.IdempotencyKey) > MaxIdempotencyKeyLength:
 		return fmt.Errorf("%w: idempotencyKey must be at most %d characters", ErrValidation, MaxIdempotencyKeyLength)
 	}
@@ -91,7 +101,25 @@ func (r TransferRequest) Validate() error {
 // Fingerprint returns a stable hash of the fields that define the transfer.
 // It is stored with the idempotency key so that reusing a key with a different
 // payload can be detected.
+//
+// The fields are encoded as a JSON object rather than joined with a plain
+// delimiter such as "|". A delimiter that can also appear inside a field
+// (wallet IDs are not restricted to excluding it) makes the encoding
+// ambiguous: {from: "a|b", to: "c"} and {from: "a", to: "b|c"} would hash to
+// the same value, so reusing a key for a genuinely different payload could be
+// wrongly treated as a replay instead of a conflict. JSON's length-prefixed,
+// quoted string encoding does not have this problem.
 func (r TransferRequest) Fingerprint() string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d", r.FromWalletID, r.ToWalletID, r.Amount)))
+	payload, err := json.Marshal(struct {
+		From   string `json:"from"`
+		To     string `json:"to"`
+		Amount int64  `json:"amount"`
+	}{r.FromWalletID, r.ToWalletID, r.Amount})
+	if err != nil {
+		// Only unrepresentable types (channels, funcs) reach this branch, and
+		// TransferRequest is a plain string/int64 struct, so this cannot occur.
+		panic(fmt.Sprintf("encode fingerprint payload: %v", err))
+	}
+	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
 }

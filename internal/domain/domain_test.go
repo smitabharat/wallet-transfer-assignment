@@ -94,3 +94,11 @@ func TestNewWalletValidation(t *testing.T) {
 		t.Errorf("negative balance: got %v", err)
 	}
 }
+
+func TestFingerprintIsUnambiguousAboutFieldBoundaries(t *testing.T) {
+	a := TransferRequest{FromWalletID: "a|b", ToWalletID: "c", Amount: 1}
+	b := TransferRequest{FromWalletID: "a", ToWalletID: "b|c", Amount: 1}
+	if a.Fingerprint() == b.Fingerprint() {
+		t.Error("fingerprint collided across a field boundary containing the delimiter")
+	}
+}
