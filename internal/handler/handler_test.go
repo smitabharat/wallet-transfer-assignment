@@ -3,12 +3,14 @@ package handler_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/smitabharat/wallet-transfer-assignment/internal/domain"
 	"github.com/smitabharat/wallet-transfer-assignment/internal/handler"
 	"github.com/smitabharat/wallet-transfer-assignment/internal/repository"
 	"github.com/smitabharat/wallet-transfer-assignment/internal/repository/pgtest"
@@ -144,6 +146,18 @@ func TestTransferErrorStatusCodes(t *testing.T) {
 		"malformed json":     {`{"amount":`, http.StatusBadRequest},
 		"unknown field":      {`{"amount":5,"fromWalletId":"wallet_1","toWalletId":"wallet_2","extra":1}`, http.StatusBadRequest},
 		"fractional amount":  {`{"fromWalletId":"wallet_1","toWalletId":"wallet_2","amount":1.5}`, http.StatusBadRequest},
+		"trailing JSON value": {
+			`{"idempotencyKey":"trail","fromWalletId":"wallet_1","toWalletId":"wallet_2","amount":5}{"unexpected":true}`,
+			http.StatusBadRequest,
+		},
+		"trailing garbage text": {
+			`{"idempotencyKey":"trail2","fromWalletId":"wallet_1","toWalletId":"wallet_2","amount":5} garbage`,
+			http.StatusBadRequest,
+		},
+		"amount above the maximum": {
+			fmt.Sprintf(`{"idempotencyKey":"toobig","fromWalletId":"wallet_1","toWalletId":"wallet_2","amount":%d}`, domain.MaxAmount+1),
+			http.StatusBadRequest,
+		},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

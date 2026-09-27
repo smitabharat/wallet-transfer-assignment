@@ -167,6 +167,13 @@ func decodeJSON(r *http.Request, dst any) error {
 	if err := dec.Decode(dst); err != nil {
 		return errors.New("invalid JSON body: " + err.Error())
 	}
+	// Decode() only parses the first JSON value it finds and silently ignores
+	// anything after it, so a body of two concatenated objects or valid JSON
+	// followed by trailing text would otherwise be accepted. Decoding once
+	// more and requiring io.EOF confirms the body held exactly one value.
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("invalid JSON body: must contain a single JSON object")
+	}
 	return nil
 }
 
