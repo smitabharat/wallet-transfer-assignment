@@ -91,6 +91,20 @@ Why these constraints:
   transfer.
 - `idempotency_records.key` is the primary key and `transfers.idempotency_key`
   is unique — two concurrent requests with the same key cannot both commit.
+- `UNIQUE(transfer_id, type)` bounds each transfer to *at most* one DEBIT and
+  one CREDIT, but on its own it does not require both to exist, and it does
+  not check that a row's wallet or amount actually matches the transfer it
+  belongs to — a bug or a future caller could still commit a transfer marked
+  PROCESSED with only one ledger row, or one with the wrong wallet or amount.
+  A `DEFERRABLE INITIALLY DEFERRED` constraint trigger on both `transfers` and
+  `ledger_entries` closes that gap: at commit, it requires every PROCESSED
+  transfer to have exactly one DEBIT (`from_wallet_id`, `amount`) and one
+  CREDIT (`to_wallet_id`, `amount`) row, and requires every PENDING or FAILED
+  transfer to have none. Deferring it to commit time (rather than checking
+  immediately) lets the service insert the transfer, the debit, the credit and
+  the status update as separate statements within one transaction, the same
+  way it already does, while still making the *end state* impossible to leave
+  inconsistent.
 
 **Balance model:** a stored balance is updated inside the same transaction that
 writes the ledger. The invariant, verified in tests, is
@@ -133,11 +147,18 @@ has moved but the idempotency record is missing, or vice versa.
 ## 5. Idempotency
 
 - **Storage:** `idempotency_records` holds the key, a SHA-256 fingerprint of the
-  canonical request (`from|to|amount`), the transfer id and a JSON snapshot of
-  the transfer returned the first time. The HTTP status is a pure function of
-  the transfer status (`PROCESSED` → 201, `FAILED` → 422), so the service layer
-  stays transport-agnostic while replays still get the same status and body.
-  The record is durable, so replays work across process restarts.
+  canonical request, the transfer id and a JSON snapshot of the transfer
+  returned the first time. The fingerprint hashes the request fields encoded
+  as a JSON object (`{"from":...,"to":...,"amount":...}`), not joined with a
+  plain delimiter such as `|` — a wallet ID is not restricted from containing
+  the delimiter itself, so `from="a|b", to="c"` and `from="a", to="b|c"` would
+  otherwise hash identically and a key reused for that second, different
+  request would be wrongly replayed instead of rejected with `409`. JSON's
+  quoted, length-prefixed strings don't have that ambiguity. The HTTP status
+  is a pure function of the transfer status (`PROCESSED` → 201, `FAILED` →
+  422), so the service layer stays transport-agnostic while replays still get
+  the same status and body. The record is durable, so replays work across
+  process restarts.
 - **Detection:** lookup by primary key inside the write transaction; the unique
   constraint is a backstop if two writers ever race (on a unique violation the
   service re-reads the winner's record and replays it).
